@@ -13,19 +13,40 @@ import tempfile
 import os
 import cv2
 
+from calibration import mask_to_diameter_mm, fit_ellipse_diameter_mm, fit_ellipse_px, get_scale
+from visualizacion import draw_measurements
+
 # ---------- CONFIG ----------
 # Ruta relativa: en HF Spaces el modelo debe subirse junto a app.py
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best.pt")
 
+# Equipo en el que se calibró esta instancia (debe coincidir EXACTO con el
+# perfil ya guardado en Supabase por auto_calibrate.py o la app de
+# calibración manual -- esto se ajusta una vez por instalación, no por uso).
+EQUIPO_MARCA = "GE"                # TODO: confirma marca real
+EQUIPO_MODELO = "Voluson"          # TODO: confirma modelo real (ej. Voluson E10)
+EQUIPO_TRANSDUCTOR = "6V1"
+EQUIPO_PROFUNDIDAD_CM = 6.0
+
 st.set_page_config(page_title="Foliculos AI - Demo", layout="wide")
 
 st.title("🔬 Foliculos AI — Demo de deteccion")
-st.caption("Segmentacion de foliculos en ultrasonido 2D (GE Voluson) con YOLOv8-seg")
+st.caption("Segmentacion y medicion de foliculos en ultrasonido 2D (GE Voluson) con YOLOv8-seg")
 
 # ---------- LOAD MODEL (cacheado para no recargarlo en cada interaccion) ----------
 @st.cache_resource
 def load_model(path):
     return YOLO(path)
+
+# ---------- LOAD ESCALA (cacheada, se busca UNA vez, no por imagen) ----------
+@st.cache_resource
+def load_escala():
+    return get_scale(
+        marca=EQUIPO_MARCA,
+        modelo=EQUIPO_MODELO,
+        profundidad_cm=EQUIPO_PROFUNDIDAD_CM,
+        transductor=EQUIPO_TRANSDUCTOR,
+    )
 
 if not os.path.exists(MODEL_PATH):
     st.error(
@@ -36,10 +57,22 @@ if not os.path.exists(MODEL_PATH):
 
 model = load_model(MODEL_PATH)
 
+ESCALA_MM_PX = load_escala()
+if ESCALA_MM_PX is None:
+    st.error(
+        f"No hay un perfil de calibración guardado para "
+        f"{EQUIPO_MARCA} {EQUIPO_MODELO} ({EQUIPO_TRANSDUCTOR}, "
+        f"D={EQUIPO_PROFUNDIDAD_CM}cm).\n\n"
+        f"Este equipo necesita calibrarse primero con auto_calibrate.py "
+        f"o la app de calibración manual antes de poder medir en mm."
+    )
+    st.stop()
+
 # ---------- SIDEBAR ----------
 st.sidebar.header("Parametros")
 conf = st.sidebar.slider("Confianza minima", 0.05, 0.95, 0.5, 0.05)
 modo = st.sidebar.radio("Modo", ["Imagen", "Video"])
+st.sidebar.caption(f"Escala activa: {ESCALA_MM_PX:.4f} mm/px")
 
 # ---------- IMAGEN ----------
 if modo == "Imagen":
@@ -56,29 +89,57 @@ if modo == "Imagen":
         with st.spinner("Corriendo inferencia..."):
             results = model.predict(np.array(img), conf=conf, verbose=False)
             r = results[0]
-            plotted = r.plot()  # numpy array BGR con mascaras dibujadas
+
+            # Por cada mascara segmentada: la reescalamos a las dimensiones
+            # ORIGINALES de la imagen (masks.data viene en la resolucion interna
+            # del modelo, ej. 448x640, no en el tamaño real de la imagen -- si no
+            # se reescala, la elipse queda medida y dibujada en el lugar equivocado)
+            orig_h, orig_w = r.orig_shape
+            foliculos = []
+            if r.masks is not None:
+                for i, (mask, box) in enumerate(zip(r.masks.data, r.boxes)):
+                    mask_np = mask.cpu().numpy().astype("uint8")
+                    mask_np = cv2.resize(
+                        mask_np, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST
+                    )
+                    ejes = fit_ellipse_diameter_mm(mask_np, ESCALA_MM_PX)
+                    ellipse_px = fit_ellipse_px(mask_np)
+                    diam_equiv_mm, _ = mask_to_diameter_mm(mask_np, ESCALA_MM_PX)
+
+                    foliculos.append({
+                        "id": i + 1,
+                        "confianza": float(box.conf[0]),
+                        "eje_mayor_mm": round(ejes["eje_mayor_mm"], 2) if ejes else None,
+                        "eje_menor_mm": round(ejes["eje_menor_mm"], 2) if ejes else None,
+                        "promedio_ejes_mm": round(ejes["promedio_mm"], 2) if ejes else None,
+                        "diametro_equivalente_mm": round(diam_equiv_mm, 2),
+                        "ellipse": ellipse_px,
+                    })
+
+            # Dibujamos las lineas de medicion (estilo caliper) sobre la imagen,
+            # en vez del plot por defecto de ultralytics (que solo marca cajas)
+            img_bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+            plotted = draw_measurements(img_bgr, foliculos) if foliculos else img_bgr
             plotted_rgb = cv2.cvtColor(plotted, cv2.COLOR_BGR2RGB)
 
         with col2:
-            st.subheader("Deteccion")
+            st.subheader("Deteccion y medicion")
             st.image(plotted_rgb, width=380)
 
-        n_foliculos = len(r.boxes) if r.boxes is not None else 0
+        n_foliculos = len(foliculos)
         st.success(f"Foliculos detectados: {n_foliculos}")
 
         if n_foliculos > 0:
             st.subheader("Detalle por foliculo")
             data = []
-            for i, box in enumerate(r.boxes):
-                conf_val = float(box.conf[0])
-                xyxy = box.xyxy[0].tolist()
-                ancho = xyxy[2] - xyxy[0]
-                alto = xyxy[3] - xyxy[1]
+            for f in foliculos:
                 data.append({
-                    "Foliculo": i + 1,
-                    "Confianza": round(conf_val, 3),
-                    "Ancho (px)": round(ancho, 1),
-                    "Alto (px)": round(alto, 1),
+                    "Foliculo": f["id"],
+                    "Confianza": round(f["confianza"], 3),
+                    "Eje mayor (mm)": f["eje_mayor_mm"],
+                    "Eje menor (mm)": f["eje_menor_mm"],
+                    "Promedio (mm)": f["promedio_ejes_mm"],
+                    "Diametro equiv. (mm)": f["diametro_equivalente_mm"],
                 })
             st.table(data)
 
