@@ -133,6 +133,7 @@ if modo == "Imagen":
                         "promedio_ejes_mm": round(ejes["promedio_mm"], 2) if ejes else None,
                         "diametro_equivalente_mm": round(diam_equiv_mm, 2),
                         "ellipse": ellipse_px,
+                        "mask": mask_np,
                     })
 
             # Dibujamos las lineas de medicion (estilo caliper) sobre la imagen,
