@@ -38,8 +38,8 @@ def get_client() -> Client:
     Toma las credenciales de variables de entorno (recomendado) o,
     si no existen, de las constantes de abajo (solo para pruebas rápidas).
     """
-    url = os.environ.get("SUPABASE_URL", "https://finoqbcoytpoylxdosry.supabase.co")
-    key = os.environ.get("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZpbm9xYmNveXRwb3lseGRvc3J5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc1NzU1NTksImV4cCI6MjEwMzE1MTU1OX0.bu7r-NiiLoliKH2ZrukkSRsnKLI8FjdO9jTAA3wxHwU")
+    url = os.environ.get("SUPABASE_URL", "https://TU-PROYECTO.supabase.co")
+    key = os.environ.get("SUPABASE_ANON_KEY", "TU-ANON-KEY-PUBLICA")
     if "TU-PROYECTO" in url:
         raise RuntimeError(
             "Configura SUPABASE_URL y SUPABASE_ANON_KEY como variables de "
@@ -106,6 +106,94 @@ def mask_to_diameter_mm(mask: np.ndarray, escala_mm_px: float) -> tuple[float, f
     diam_px = 2 * math.sqrt(area_px / math.pi)
     diam_mm = diam_px * escala_mm_px
     return diam_mm, diam_px
+
+
+def feret_diameters_px(mask: np.ndarray) -> Optional[dict]:
+    """
+    Mide el folículo directamente sobre su contorno real, sin ajustar
+    ninguna forma matemática encima -- a diferencia de fit_ellipse_px, esto
+    NUNCA se sale de la máscara real, porque los puntos de la medición
+    son literalmente puntos del borde detectado por el modelo.
+
+    Eje mayor = diámetro de Feret: la distancia máxima entre 2 puntos
+    cualquiera del contorno (equivalente al hull convexo, es más eficiente
+    buscar solo ahí porque el par más lejano siempre cae en el hull).
+
+    Eje menor = ancho del folículo medido perpendicular a ese eje mayor
+    (proyectando todo el contorno sobre la dirección perpendicular).
+
+    Devuelve dict con 'eje_mayor_px', 'eje_menor_px', y los puntos extremos
+    de cada eje (para dibujar exactamente lo que se midió), o None si el
+    contorno es muy pequeño.
+    """
+    mask_bin = (mask > 0).astype(np.uint8) * 255
+    contours, _ = cv2.findContours(
+        mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+    )
+    if not contours:
+        return None
+    contour = max(contours, key=cv2.contourArea)
+    if len(contour) < 3:
+        return None
+
+    hull = cv2.convexHull(contour).reshape(-1, 2)
+
+    # eje mayor: el par de puntos del hull más separado entre sí (fuerza
+    # bruta -- el hull suele tener pocas decenas de puntos, es instantáneo)
+    max_d = -1.0
+    p1_mayor = p2_mayor = None
+    for i in range(len(hull)):
+        for j in range(i + 1, len(hull)):
+            d = math.hypot(hull[i][0] - hull[j][0], hull[i][1] - hull[j][1])
+            if d > max_d:
+                max_d = d
+                p1_mayor, p2_mayor = hull[i], hull[j]
+
+    if max_d <= 0:
+        return None
+
+    # eje menor: ancho real del folículo, perpendicular al eje mayor,
+    # proyectando el contorno completo sobre esa dirección
+    dx = p2_mayor[0] - p1_mayor[0]
+    dy = p2_mayor[1] - p1_mayor[1]
+    norm = math.hypot(dx, dy)
+    perp = (-dy / norm, dx / norm)
+
+    pts = contour.reshape(-1, 2)
+    proyecciones = [
+        (px - p1_mayor[0]) * perp[0] + (py - p1_mayor[1]) * perp[1]
+        for px, py in pts
+    ]
+    idx_min = int(np.argmin(proyecciones))
+    idx_max = int(np.argmax(proyecciones))
+    eje_menor_px = proyecciones[idx_max] - proyecciones[idx_min]
+
+    return {
+        "eje_mayor_px": max_d,
+        "eje_menor_px": eje_menor_px,
+        "p_mayor_1": tuple(p1_mayor),
+        "p_mayor_2": tuple(p2_mayor),
+        "p_menor_1": tuple(pts[idx_min]),
+        "p_menor_2": tuple(pts[idx_max]),
+    }
+
+
+def feret_diameters_mm(mask: np.ndarray, escala_mm_px: float) -> Optional[dict]:
+    """Igual que feret_diameters_px pero ya convertido a mm."""
+    f = feret_diameters_px(mask)
+    if f is None:
+        return None
+    eje_mayor_mm = f["eje_mayor_px"] * escala_mm_px
+    eje_menor_mm = f["eje_menor_px"] * escala_mm_px
+    return {
+        "eje_mayor_mm": eje_mayor_mm,
+        "eje_menor_mm": eje_menor_mm,
+        "promedio_mm": (eje_mayor_mm + eje_menor_mm) / 2,
+        "p_mayor_1": f["p_mayor_1"],
+        "p_mayor_2": f["p_mayor_2"],
+        "p_menor_1": f["p_menor_1"],
+        "p_menor_2": f["p_menor_2"],
+    }
 
 
 def fit_ellipse_px(mask: np.ndarray) -> Optional[tuple]:
