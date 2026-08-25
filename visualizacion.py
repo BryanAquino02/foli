@@ -58,6 +58,9 @@ def draw_measurements(image_bgr: np.ndarray, foliculos: list[dict]) -> np.ndarra
         - 'ellipse': tupla cruda de cv2.fitEllipse ((cx,cy),(menor,mayor),angulo)
         - 'eje_mayor_mm', 'eje_menor_mm': ya convertidos a mm
         - 'promedio_ejes_mm' (opcional): si no viene, se calcula del mayor/menor
+        - 'mask' (opcional): la máscara real segmentada (para dibujar su
+          contorno verdadero, no solo la elipse ajustada -- así se ve si la
+          elipse realmente representa bien la forma que detectó el modelo)
 
     Cada folículo se dibuja con un color según su tamaño (pequeño/mediano/
     grande) -- útil para identificar de un vistazo el folículo dominante.
@@ -80,7 +83,20 @@ def draw_measurements(image_bgr: np.ndarray, foliculos: list[dict]) -> np.ndarra
             promedio_mm = (f["eje_mayor_mm"] + f["eje_menor_mm"]) / 2
         color = _color_por_tamano(promedio_mm)
 
-        # contorno de la elipse ajustada, en el color de su categoría de tamaño
+        # contorno REAL de la segmentación (la forma que detectó el modelo,
+        # antes de ajustar cualquier elipse) -- fino y en blanco, para
+        # distinguirlo claramente de la elipse de medición
+        mask = f.get("mask")
+        if mask is not None:
+            mask_bin = (mask > 0).astype(np.uint8) * 255
+            contours, _ = cv2.findContours(
+                mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            )
+            cv2.drawContours(out, contours, -1, (235, 235, 235), 1, cv2.LINE_AA)
+
+        # elipse ajustada, en el color de su categoría de tamaño -- esta es
+        # la que se usa para MEDIR, puede no calzar exacto con el contorno
+        # real si el folículo es irregular
         cv2.ellipse(out, ellipse, color, 2, cv2.LINE_AA)
 
         # eje mayor, dibujado como la línea de caliper (punteada, cruces en
