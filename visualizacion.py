@@ -30,6 +30,10 @@ COLOR_TEXT = (245, 245, 245)
 UMBRAL_PEQUENO_MEDIANO = 10.0
 UMBRAL_MEDIANO_GRANDE = 16.0
 
+# Opacidad del relleno de la máscara (0 = invisible, 1 = sólido).
+# 0.3-0.4 se ve bien sobre ultrasonido sin tapar la textura de fondo.
+ALPHA_RELLENO = 0.35
+
 
 def _color_por_tamano(diametro_mm: float) -> tuple:
     if diametro_mm < UMBRAL_PEQUENO_MEDIANO:
@@ -51,6 +55,35 @@ def _ellipse_axis_endpoints(center, axis_len, angle_deg):
     return p1, p2
 
 
+def _rellenar_mascara_transparente(image_bgr, mask, color_bgr, alpha=ALPHA_RELLENO):
+    """
+    Rellena el área de una máscara con un color semitransparente, mezclando
+    con la imagen de fondo solo en esa región (el resto de la imagen no se
+    toca).
+
+    image_bgr: imagen (BGR) sobre la que se pinta -- YA en la resolución
+        original (ver bug #4 del README: hay que hacer cv2.resize del
+        mask con r.orig_shape ANTES de llegar aquí, si no el relleno cae
+        en el lugar equivocado).
+    mask: máscara binaria del folículo (0/1 o 0/255), misma resolución
+        que image_bgr.
+    color_bgr: tupla (B, G, R).
+    alpha: opacidad del relleno.
+    """
+    mask_bool = mask.astype(bool)
+    if not mask_bool.any():
+        return image_bgr
+
+    overlay = image_bgr.copy()
+    overlay[mask_bool] = color_bgr
+
+    blended = cv2.addWeighted(overlay, alpha, image_bgr, 1 - alpha, 0)
+
+    out = image_bgr.copy()
+    out[mask_bool] = blended[mask_bool]
+    return out
+
+
 def draw_measurements(image_bgr: np.ndarray, foliculos: list[dict]) -> np.ndarray:
     """
     image_bgr: imagen original (formato OpenCV, BGR) sobre la que dibujar.
@@ -60,13 +93,16 @@ def draw_measurements(image_bgr: np.ndarray, foliculos: list[dict]) -> np.ndarra
         - 'p_menor_1', 'p_menor_2': extremos del eje menor
         - 'eje_mayor_mm', 'eje_menor_mm'
         - 'promedio_ejes_mm' (opcional): si no viene, se calcula del mayor/menor
-        - 'mask' (opcional): la máscara real, para dibujar su contorno de fondo
+        - 'mask' (opcional): la máscara real, usada para el relleno
+          semitransparente y el contorno de fondo
 
     Cada folículo se dibuja con un color según su tamaño (pequeño/mediano/
     grande) -- útil para identificar de un vistazo el folículo dominante.
+    El área segmentada se rellena con ese mismo color, semitransparente,
+    para que se vea de un vistazo qué región detectó el modelo.
 
-    Devuelve una COPIA de la imagen con las líneas y textos dibujados
-    (no modifica la imagen original).
+    Devuelve una COPIA de la imagen con el relleno, líneas y textos
+    dibujados (no modifica la imagen original).
     """
     out = image_bgr.copy()
 
@@ -80,8 +116,14 @@ def draw_measurements(image_bgr: np.ndarray, foliculos: list[dict]) -> np.ndarra
             promedio_mm = (f["eje_mayor_mm"] + f["eje_menor_mm"]) / 2
         color = _color_por_tamano(promedio_mm)
 
-        # contorno real de la segmentación, de fondo
         mask = f.get("mask")
+
+        # relleno semitransparente de la máscara -- va primero, para que
+        # el contorno, los ejes y la etiqueta se dibujen nítidos encima
+        if mask is not None:
+            out = _rellenar_mascara_transparente(out, mask, color)
+
+        # contorno real de la segmentación, de fondo
         if mask is not None:
             mask_bin = (mask > 0).astype(np.uint8) * 255
             contours, _ = cv2.findContours(
