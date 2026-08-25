@@ -13,7 +13,7 @@ import tempfile
 import os
 import cv2
 
-from calibration import mask_to_diameter_mm, fit_ellipse_diameter_mm, fit_ellipse_px, get_scale
+from calibration import mask_to_diameter_mm, feret_diameters_mm, get_scale
 from visualizacion import draw_measurements
 
 # ---------- CONFIG ----------
@@ -121,8 +121,7 @@ if modo == "Imagen":
                     mask_np = cv2.resize(
                         mask_np, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST
                     )
-                    ejes = fit_ellipse_diameter_mm(mask_np, ESCALA_MM_PX)
-                    ellipse_px = fit_ellipse_px(mask_np)
+                    ejes = feret_diameters_mm(mask_np, ESCALA_MM_PX)
                     diam_equiv_mm, _ = mask_to_diameter_mm(mask_np, ESCALA_MM_PX)
 
                     foliculos.append({
@@ -132,7 +131,10 @@ if modo == "Imagen":
                         "eje_menor_mm": round(ejes["eje_menor_mm"], 2) if ejes else None,
                         "promedio_ejes_mm": round(ejes["promedio_mm"], 2) if ejes else None,
                         "diametro_equivalente_mm": round(diam_equiv_mm, 2),
-                        "ellipse": ellipse_px,
+                        "p_mayor_1": ejes["p_mayor_1"] if ejes else None,
+                        "p_mayor_2": ejes["p_mayor_2"] if ejes else None,
+                        "p_menor_1": ejes["p_menor_1"] if ejes else None,
+                        "p_menor_2": ejes["p_menor_2"] if ejes else None,
                         "mask": mask_np,
                     })
 
