@@ -55,12 +55,12 @@ def draw_measurements(image_bgr: np.ndarray, foliculos: list[dict]) -> np.ndarra
     """
     image_bgr: imagen original (formato OpenCV, BGR) sobre la que dibujar.
     foliculos: lista de dicts, cada uno con:
-        - 'ellipse': tupla cruda de cv2.fitEllipse ((cx,cy),(menor,mayor),angulo)
-        - 'eje_mayor_mm', 'eje_menor_mm': ya convertidos a mm
+        - 'p_mayor_1', 'p_mayor_2': extremos del eje mayor (puntos reales
+          del contorno, nunca se salen de la máscara)
+        - 'p_menor_1', 'p_menor_2': extremos del eje menor
+        - 'eje_mayor_mm', 'eje_menor_mm'
         - 'promedio_ejes_mm' (opcional): si no viene, se calcula del mayor/menor
-        - 'mask' (opcional): la máscara real segmentada (para dibujar su
-          contorno verdadero, no solo la elipse ajustada -- así se ve si la
-          elipse realmente representa bien la forma que detectó el modelo)
+        - 'mask' (opcional): la máscara real, para dibujar su contorno de fondo
 
     Cada folículo se dibuja con un color según su tamaño (pequeño/mediano/
     grande) -- útil para identificar de un vistazo el folículo dominante.
@@ -71,21 +71,16 @@ def draw_measurements(image_bgr: np.ndarray, foliculos: list[dict]) -> np.ndarra
     out = image_bgr.copy()
 
     for f in foliculos:
-        ellipse = f.get("ellipse")
-        if ellipse is None:
+        p_mayor_1, p_mayor_2 = f.get("p_mayor_1"), f.get("p_mayor_2")
+        if p_mayor_1 is None or p_mayor_2 is None:
             continue
-
-        center, (eje_menor_px, eje_mayor_px), angle = ellipse
-        center_int = (int(round(center[0])), int(round(center[1])))
 
         promedio_mm = f.get("promedio_ejes_mm")
         if promedio_mm is None:
             promedio_mm = (f["eje_mayor_mm"] + f["eje_menor_mm"]) / 2
         color = _color_por_tamano(promedio_mm)
 
-        # contorno REAL de la segmentación (la forma que detectó el modelo,
-        # antes de ajustar cualquier elipse) -- fino y en blanco, para
-        # distinguirlo claramente de la elipse de medición
+        # contorno real de la segmentación, de fondo
         mask = f.get("mask")
         if mask is not None:
             mask_bin = (mask > 0).astype(np.uint8) * 255
@@ -94,22 +89,27 @@ def draw_measurements(image_bgr: np.ndarray, foliculos: list[dict]) -> np.ndarra
             )
             cv2.drawContours(out, contours, -1, (235, 235, 235), 1, cv2.LINE_AA)
 
-        # elipse ajustada, en el color de su categoría de tamaño -- esta es
-        # la que se usa para MEDIR, puede no calzar exacto con el contorno
-        # real si el folículo es irregular
-        cv2.ellipse(out, ellipse, color, 2, cv2.LINE_AA)
-
-        # eje mayor, dibujado como la línea de caliper (punteada, cruces en
-        # los extremos) -- mismo color que el contorno, para que la
-        # categoría de tamaño se lea de un vistazo
-        p1, p2 = _ellipse_axis_endpoints(center, eje_mayor_px, angle)
-        _draw_dotted_line(out, p1, p2, color)
+        # eje mayor: línea sólida entre los 2 puntos reales del contorno
+        # más separados entre sí -- nunca se sale de la máscara
+        p1 = (int(round(p_mayor_1[0])), int(round(p_mayor_1[1])))
+        p2 = (int(round(p_mayor_2[0])), int(round(p_mayor_2[1])))
+        cv2.line(out, p1, p2, color, 2, cv2.LINE_AA)
         _draw_cross(out, p1, color)
         _draw_cross(out, p2, color)
 
+        # eje menor: línea punteada perpendicular, también anclada al
+        # contorno real
+        p_menor_1, p_menor_2 = f.get("p_menor_1"), f.get("p_menor_2")
+        if p_menor_1 is not None and p_menor_2 is not None:
+            q1 = (int(round(p_menor_1[0])), int(round(p_menor_1[1])))
+            q2 = (int(round(p_menor_2[0])), int(round(p_menor_2[1])))
+            _draw_dotted_line(out, q1, q2, color)
+
+        center = (int(round((p1[0]+p2[0])/2)), int(round((p1[1]+p2[1])/2)))
+
         # etiqueta con el diámetro mayor en mm
         label = f"{f['eje_mayor_mm']:.1f} mm"
-        _draw_label(out, label, (center_int[0] + 8, center_int[1] - 8), color)
+        _draw_label(out, label, (center[0] + 8, center[1] - 8), color)
 
     return out
 
