@@ -38,8 +38,8 @@ def get_client() -> Client:
     Toma las credenciales de variables de entorno (recomendado) o,
     si no existen, de las constantes de abajo (solo para pruebas rápidas).
     """
-    url = os.environ.get("SUPABASE_URL", "https://TU-PROYECTO.supabase.co")
-    key = os.environ.get("SUPABASE_ANON_KEY", "TU-ANON-KEY-PUBLICA")
+    url = os.environ.get("SUPABASE_URL", "https://finoqbcoytpoylxdosry.supabase.co")
+    key = os.environ.get("SUPABASE_ANON_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImZpbm9xYmNveXRwb3lseGRvc3J5Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODc1NzU1NTksImV4cCI6MjEwMzE1MTU1OX0.bu7r-NiiLoliKH2ZrukkSRsnKLI8FjdO9jTAA3wxHwU")
     if "TU-PROYECTO" in url:
         raise RuntimeError(
             "Configura SUPABASE_URL y SUPABASE_ANON_KEY como variables de "
