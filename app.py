@@ -20,13 +20,32 @@ from visualizacion import draw_measurements
 # Ruta relativa: en HF Spaces el modelo debe subirse junto a app.py
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best.pt")
 
+# calibration.py lee las credenciales de Supabase de os.environ (para poder
+# usarse también fuera de Streamlit, ej. desde auto_calibrate.py por
+# consola). Acá las copiamos desde st.secrets para que ambos coincidan sin
+# duplicar configuración en dos lugares.
+for _key in ("SUPABASE_URL", "SUPABASE_ANON_KEY"):
+    if _key in st.secrets and _key not in os.environ:
+        os.environ[_key] = str(st.secrets[_key])
+
 # Equipo en el que se calibró esta instancia (debe coincidir EXACTO con el
 # perfil ya guardado en Supabase por auto_calibrate.py o la app de
-# calibración manual -- esto se ajusta una vez por instalación, no por uso).
-EQUIPO_MARCA = "GE"                # TODO: confirma marca real
-EQUIPO_MODELO = "Voluson"          # TODO: confirma modelo real (ej. Voluson E10)
-EQUIPO_TRANSDUCTOR = "6V1"
-EQUIPO_PROFUNDIDAD_CM = 6.0
+# calibración manual). Se lee de los secrets de este deploy -- así el mismo
+# app.py sirve para cualquier sede, solo cambia la configuración por deploy,
+# no el código.
+#
+# En Streamlit Cloud / HF Spaces, agrega esto en "Secrets":
+#   EQUIPO_MARCA = "GE"
+#   EQUIPO_MODELO = "Voluson"
+#   EQUIPO_TRANSDUCTOR = "6V1"
+#   EQUIPO_PROFUNDIDAD_CM = 6.0
+#
+# Los valores de abajo son solo el respaldo para correrlo en tu compu local
+# sin configurar secrets.
+EQUIPO_MARCA = st.secrets.get("EQUIPO_MARCA", "GE")
+EQUIPO_MODELO = st.secrets.get("EQUIPO_MODELO", "Voluson")
+EQUIPO_TRANSDUCTOR = st.secrets.get("EQUIPO_TRANSDUCTOR", "6V1")
+EQUIPO_PROFUNDIDAD_CM = float(st.secrets.get("EQUIPO_PROFUNDIDAD_CM", 6.0))
 
 st.set_page_config(page_title="Foliculos AI - Demo", layout="wide")
 
@@ -84,7 +103,7 @@ if modo == "Imagen":
 
         with col1:
             st.subheader("Original")
-            st.image(img, width=380)
+            st.image(img, use_container_width=True)
 
         with st.spinner("Corriendo inferencia..."):
             results = model.predict(np.array(img), conf=conf, verbose=False)
@@ -124,7 +143,7 @@ if modo == "Imagen":
 
         with col2:
             st.subheader("Deteccion y medicion")
-            st.image(plotted_rgb, width=380)
+            st.image(plotted_rgb, use_container_width=True)
 
         n_foliculos = len(foliculos)
         st.success(f"Foliculos detectados: {n_foliculos}")
