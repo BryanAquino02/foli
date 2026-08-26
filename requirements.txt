@@ -5,3 +5,4 @@ pillow
 numpy==1.26.4
 supabase
 lapx>=0.5.2
+imageio[ffmpeg]
