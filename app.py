@@ -87,6 +87,47 @@ if ESCALA_MM_PX is None:
     )
     st.stop()
 
+# ---------- FUNCION COMPARTIDA: mismo pipeline que el modo Imagen ----------
+# Toma un resultado (r) de ultralytics para UN frame y arma la lista de
+# foliculos con medidas en mm, igual que en modo Imagen. Si track_ids viene
+# (de model.track con persist=True), usamos ese id -- asi el mismo foliculo
+# conserva su numero entre frames en vez de renumerarse cada vez.
+def procesar_resultado(r, escala_mm_px):
+    orig_h, orig_w = r.orig_shape
+    foliculos = []
+    if r.masks is None:
+        return foliculos
+
+    track_ids = None
+    if r.boxes is not None and r.boxes.id is not None:
+        track_ids = r.boxes.id.int().cpu().tolist()
+
+    for i, (mask, box) in enumerate(zip(r.masks.data, r.boxes)):
+        mask_np = mask.cpu().numpy().astype("uint8")
+        # Mismo bug de siempre: masks.data viene en resolucion del modelo,
+        # hay que reescalar a la resolucion original del frame antes de medir.
+        mask_np = cv2.resize(mask_np, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+
+        ejes = feret_diameters_mm(mask_np, escala_mm_px)
+        diam_equiv_mm, _ = mask_to_diameter_mm(mask_np, escala_mm_px)
+
+        foliculo_id = track_ids[i] if track_ids is not None else i + 1
+
+        foliculos.append({
+            "id": foliculo_id,
+            "confianza": float(box.conf[0]),
+            "eje_mayor_mm": round(ejes["eje_mayor_mm"], 2) if ejes else None,
+            "eje_menor_mm": round(ejes["eje_menor_mm"], 2) if ejes else None,
+            "promedio_ejes_mm": round(ejes["promedio_mm"], 2) if ejes else None,
+            "diametro_equivalente_mm": round(diam_equiv_mm, 2),
+            "p_mayor_1": ejes["p_mayor_1"] if ejes else None,
+            "p_mayor_2": ejes["p_mayor_2"] if ejes else None,
+            "p_menor_1": ejes["p_menor_1"] if ejes else None,
+            "p_menor_2": ejes["p_menor_2"] if ejes else None,
+            "mask": mask_np,
+        })
+    return foliculos
+
 # ---------- SIDEBAR ----------
 st.sidebar.header("Parametros")
 conf = st.sidebar.slider("Confianza minima", 0.05, 0.95, 0.5, 0.05)
@@ -108,35 +149,7 @@ if modo == "Imagen":
         with st.spinner("Corriendo inferencia..."):
             results = model.predict(np.array(img), conf=conf, verbose=False)
             r = results[0]
-
-            # Por cada mascara segmentada: la reescalamos a las dimensiones
-            # ORIGINALES de la imagen (masks.data viene en la resolucion interna
-            # del modelo, ej. 448x640, no en el tamaño real de la imagen -- si no
-            # se reescala, la elipse queda medida y dibujada en el lugar equivocado)
-            orig_h, orig_w = r.orig_shape
-            foliculos = []
-            if r.masks is not None:
-                for i, (mask, box) in enumerate(zip(r.masks.data, r.boxes)):
-                    mask_np = mask.cpu().numpy().astype("uint8")
-                    mask_np = cv2.resize(
-                        mask_np, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST
-                    )
-                    ejes = feret_diameters_mm(mask_np, ESCALA_MM_PX)
-                    diam_equiv_mm, _ = mask_to_diameter_mm(mask_np, ESCALA_MM_PX)
-
-                    foliculos.append({
-                        "id": i + 1,
-                        "confianza": float(box.conf[0]),
-                        "eje_mayor_mm": round(ejes["eje_mayor_mm"], 2) if ejes else None,
-                        "eje_menor_mm": round(ejes["eje_menor_mm"], 2) if ejes else None,
-                        "promedio_ejes_mm": round(ejes["promedio_mm"], 2) if ejes else None,
-                        "diametro_equivalente_mm": round(diam_equiv_mm, 2),
-                        "p_mayor_1": ejes["p_mayor_1"] if ejes else None,
-                        "p_mayor_2": ejes["p_mayor_2"] if ejes else None,
-                        "p_menor_1": ejes["p_menor_1"] if ejes else None,
-                        "p_menor_2": ejes["p_menor_2"] if ejes else None,
-                        "mask": mask_np,
-                    })
+            foliculos = procesar_resultado(r, ESCALA_MM_PX)
 
             # Dibujamos las lineas de medicion (estilo caliper) sobre la imagen,
             # en vez del plot por defecto de ultralytics (que solo marca cajas)
@@ -169,6 +182,12 @@ if modo == "Imagen":
 else:
     archivo = st.file_uploader("Sube un video de ultrasonido", type=["mp4", "avi", "mov"])
     usar_tracking = st.sidebar.checkbox("Activar tracking (ByteTrack)", value=True)
+    frame_skip = st.sidebar.slider(
+        "Procesar 1 de cada N frames",
+        min_value=1, max_value=15, value=5, step=1,
+        help="N=1 procesa todos los frames (mas lento, mejor continuidad de tracking). "
+             "N mas alto es mas rapido pero el tracker puede perder el ID si la sonda se mueve mucho entre frames procesados."
+    )
 
     if archivo is not None:
         # Guardar el video temporalmente porque YOLO necesita una ruta de archivo
@@ -180,41 +199,75 @@ else:
         st.video(input_path)
 
         if st.button("Procesar video"):
-            with st.spinner("Procesando video... esto puede tardar segun duracion/resolucion"):
-                if usar_tracking:
-                    results = model.track(
-                        source=input_path,
-                        conf=conf,
-                        tracker="bytetrack.yaml",
-                        save=True,
-                        project=tempfile.gettempdir(),
-                        name="foliculos_out",
-                        exist_ok=True,
-                    )
-                else:
-                    results = model.predict(
-                        source=input_path,
-                        conf=conf,
-                        save=True,
-                        project=tempfile.gettempdir(),
-                        name="foliculos_out",
-                        exist_ok=True,
-                    )
+            cap = cv2.VideoCapture(input_path)
+            fps_in = cap.get(cv2.CAP_PROP_FPS) or 30
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            cap.release()
 
-            out_dir = os.path.join(tempfile.gettempdir(), "foliculos_out")
-            # Buscar el archivo de video de salida generado por ultralytics
-            salida = None
-            if os.path.exists(out_dir):
-                for f in os.listdir(out_dir):
-                    if f.lower().endswith((".mp4", ".avi")):
-                        salida = os.path.join(out_dir, f)
-                        break
+            out_path = os.path.join(tempfile.gettempdir(), "foliculos_out.mp4")
+            writer = None  # se crea recien con el primer frame (ya sabemos su tamaño)
 
-            if salida and os.path.exists(salida):
-                st.success("Listo. Video procesado:")
-                st.video(salida)
+            progress = st.progress(0.0)
+            status = st.empty()
+
+            # fps efectivo del video de salida: si saltamos frames, el video de
+            # salida tambien corre mas lento en frames-procesados-por-segundo,
+            # asi que ajustamos el fps de escritura para que la duracion visual
+            # se mantenga parecida al video original.
+            fps_out = max(fps_in / frame_skip, 1)
+
+            frame_idx = 0
+            procesados = 0
+
+            # stream=True: en vez de que ultralytics guarde un video completo con
+            # su propio r.plot() (sin mm), iteramos resultado por resultado y
+            # aplicamos el mismo pipeline de medicion que en modo Imagen antes de
+            # escribir el frame de salida.
+            if usar_tracking:
+                fuente_resultados = model.track(
+                    source=input_path,
+                    conf=conf,
+                    tracker="bytetrack.yaml",
+                    persist=True,
+                    stream=True,
+                    verbose=False,
+                    vid_stride=frame_skip,
+                )
             else:
-                st.warning("El video se proceso pero no encontre el archivo de salida esperado. Revisa la carpeta: " + out_dir)
+                fuente_resultados = model.predict(
+                    source=input_path,
+                    conf=conf,
+                    stream=True,
+                    verbose=False,
+                    vid_stride=frame_skip,
+                )
+
+            with st.spinner("Procesando video... esto puede tardar segun duracion/resolucion"):
+                for r in fuente_resultados:
+                    frame_bgr = r.orig_img  # ya viene en BGR (formato de cv2/ultralytics)
+                    foliculos = procesar_resultado(r, ESCALA_MM_PX)
+                    plotted = draw_measurements(frame_bgr, foliculos) if foliculos else frame_bgr
+
+                    if writer is None:
+                        h, w = plotted.shape[:2]
+                        writer = cv2.VideoWriter(
+                            out_path, cv2.VideoWriter_fourcc(*"mp4v"), fps_out, (w, h)
+                        )
+
+                    writer.write(plotted)
+
+                    procesados += 1
+                    frame_idx += frame_skip
+                    if total_frames:
+                        progress.progress(min(frame_idx / total_frames, 1.0))
+                    status.caption(f"Frames procesados: {procesados}")
+
+            if writer is not None:
+                writer.release()
+                st.success("Listo. Video procesado con medidas en mm:")
+                st.video(out_path)
+            else:
+                st.warning("No se detecto ningun frame para escribir. Revisa el video de entrada.")
 
         try:
             os.unlink(input_path)
