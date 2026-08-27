@@ -209,7 +209,10 @@ else:
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             cap.release()
 
-            out_path = os.path.join(tempfile.gettempdir(), "foliculos_out.mp4")
+            # Nombre unico por corrida (evita que una corrida anterior que no
+            # cerro bien el writer, o que sigue corriendo, choque con esta).
+            out_fd, out_path = tempfile.mkstemp(suffix=".mp4")
+            os.close(out_fd)
             writer = None  # se crea recien con el primer frame (ya sabemos su tamaño)
             # Usamos imageio + imageio-ffmpeg (trae su propio binario de ffmpeg
             # empaquetado en el .whl, no depende de nada del sistema operativo)
@@ -253,35 +256,44 @@ else:
                     vid_stride=frame_skip,
                 )
 
-            with st.spinner("Procesando video... esto puede tardar segun duracion/resolucion"):
-                for r in fuente_resultados:
-                    frame_bgr = r.orig_img  # ya viene en BGR (formato de cv2/ultralytics)
-                    foliculos = procesar_resultado(r, ESCALA_MM_PX)
-                    plotted = draw_measurements(frame_bgr, foliculos) if foliculos else frame_bgr
+            try:
+                with st.spinner("Procesando video... esto puede tardar segun duracion/resolucion"):
+                    for r in fuente_resultados:
+                        frame_bgr = r.orig_img  # ya viene en BGR (formato de cv2/ultralytics)
+                        foliculos = procesar_resultado(r, ESCALA_MM_PX)
+                        plotted = draw_measurements(frame_bgr, foliculos) if foliculos else frame_bgr
 
-                    # imageio espera frames en RGB, no BGR (formato nativo de cv2/ultralytics)
-                    plotted_rgb = cv2.cvtColor(plotted, cv2.COLOR_BGR2RGB)
+                        # imageio espera frames en RGB, no BGR (formato nativo de cv2/ultralytics)
+                        plotted_rgb = cv2.cvtColor(plotted, cv2.COLOR_BGR2RGB)
 
-                    if writer is None:
-                        writer = imageio.get_writer(
-                            out_path,
-                            fps=fps_out,
-                            codec="libx264",
-                            quality=8,
-                            macro_block_size=1,  # evita que imageio recorte/reescale por multiplos de 16
-                            output_params=["-pix_fmt", "yuv420p"],  # requerido por Safari/algunos navegadores
-                        )
+                        if writer is None:
+                            # No pasamos "-pix_fmt yuv420p" a mano: imageio-ffmpeg ya
+                            # lo agrega por defecto con codec libx264, y pasarlo de
+                            # nuevo generaba el warning "Multiple -pix_fmt options
+                            # specified" en los logs (no rompia nada, pero ensuciaba).
+                            writer = imageio.get_writer(
+                                out_path,
+                                fps=fps_out,
+                                codec="libx264",
+                                quality=8,
+                                macro_block_size=1,  # evita que imageio recorte/reescale por multiplos de 16
+                            )
 
-                    writer.append_data(plotted_rgb)
+                        writer.append_data(plotted_rgb)
 
-                    procesados += 1
-                    frame_idx += frame_skip
-                    if total_frames:
-                        progress.progress(min(frame_idx / total_frames, 1.0))
-                    status.caption(f"Frames procesados: {procesados}")
+                        procesados += 1
+                        frame_idx += frame_skip
+                        if total_frames:
+                            progress.progress(min(frame_idx / total_frames, 1.0))
+                        status.caption(f"Frames procesados: {procesados}")
+            finally:
+                # Pase lo que pase (exito, excepcion, video vacio), liberamos el
+                # proceso de ffmpeg. Si esto no se cierra, la proxima corrida
+                # puede arrastrar procesos colgados y logs raros de ffmpeg.
+                if writer is not None:
+                    writer.close()
 
-            if writer is not None:
-                writer.close()
+            if procesados > 0:
                 st.success("Listo. Video procesado con medidas en mm:")
                 st.video(out_path, width=VIDEO_WIDTH)
             else:
