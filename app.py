@@ -201,7 +201,18 @@ else:
         input_path = tfile.name
         tfile.close()  # liberar el handle antes de que YOLO/cv2 lo abra
 
-        st.video(input_path, width=VIDEO_WIDTH)
+        col_original, col_procesado = st.columns(2)
+
+        with col_original:
+            st.subheader("Original")
+            st.video(input_path, width=VIDEO_WIDTH)
+
+        # Placeholder del lado derecho: antes de procesar solo muestra un
+        # aviso; se reemplaza con el video ya procesado mas abajo.
+        with col_procesado:
+            st.subheader("Deteccion y medicion")
+            resultado_placeholder = st.empty()
+            resultado_placeholder.info("Presiona 'Procesar video' para ver el resultado aqui.")
 
         if st.button("Procesar video"):
             cap = cv2.VideoCapture(input_path)
@@ -221,9 +232,6 @@ else:
             # via <video> -- se necesita H.264 (libx264) en un mp4 bien formado.
             import imageio
 
-            progress = st.progress(0.0)
-            status = st.empty()
-
             # fps efectivo del video de salida: si saltamos frames, el video de
             # salida tambien corre mas lento en frames-procesados-por-segundo,
             # asi que ajustamos el fps de escritura para que la duracion visual
@@ -232,6 +240,13 @@ else:
 
             frame_idx = 0
             procesados = 0
+
+            # Todo lo de esta corrida (progreso, spinner, video final) va
+            # dentro de la columna derecha, para que quede al lado del
+            # video original en vez de debajo de todo.
+            resultado_placeholder.empty()
+            progress = col_procesado.progress(0.0)
+            status = col_procesado.empty()
 
             # stream=True: en vez de que ultralytics guarde un video completo con
             # su propio r.plot() (sin mm), iteramos resultado por resultado y
@@ -257,7 +272,7 @@ else:
                 )
 
             try:
-                with st.spinner("Procesando video... esto puede tardar segun duracion/resolucion"):
+                with col_procesado, st.spinner("Procesando video... esto puede tardar segun duracion/resolucion"):
                     for r in fuente_resultados:
                         frame_bgr = r.orig_img  # ya viene en BGR (formato de cv2/ultralytics)
                         foliculos = procesar_resultado(r, ESCALA_MM_PX)
@@ -293,11 +308,12 @@ else:
                 if writer is not None:
                     writer.close()
 
-            if procesados > 0:
-                st.success("Listo. Video procesado con medidas en mm:")
-                st.video(out_path, width=VIDEO_WIDTH)
-            else:
-                st.warning("No se detecto ningun frame para escribir. Revisa el video de entrada.")
+            with col_procesado:
+                if procesados > 0:
+                    st.success(f"Listo. {procesados} frames procesados con medidas en mm:")
+                    st.video(out_path, width=VIDEO_WIDTH)
+                else:
+                    st.warning("No se detecto ningun frame para escribir. Revisa el video de entrada.")
 
         try:
             os.unlink(input_path)
