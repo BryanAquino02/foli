@@ -20,6 +20,11 @@ from visualizacion import draw_measurements
 # Ruta relativa: en HF Spaces el modelo debe subirse junto a app.py
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best.pt")
 
+# Ancho fijo (en px) para la previsualizacion de video (subido y procesado).
+# Antes ocupaban el ancho completo de la columna, lo que se veia muy grande
+# en la interfaz. Bajar este numero para reducirlos aun mas.
+VIDEO_WIDTH = 480
+
 # calibration.py lee las credenciales de Supabase de os.environ (para poder
 # usarse también fuera de Streamlit, ej. desde auto_calibrate.py por
 # consola). Acá las copiamos desde st.secrets para que ambos coincidan sin
@@ -196,7 +201,7 @@ else:
         input_path = tfile.name
         tfile.close()  # liberar el handle antes de que YOLO/cv2 lo abra
 
-        st.video(input_path)
+        st.video(input_path, width=VIDEO_WIDTH)
 
         if st.button("Procesar video"):
             cap = cv2.VideoCapture(input_path)
@@ -278,7 +283,7 @@ else:
             if writer is not None:
                 writer.close()
                 st.success("Listo. Video procesado con medidas en mm:")
-                st.video(out_path)
+                st.video(out_path, width=VIDEO_WIDTH)
             else:
                 st.warning("No se detecto ningun frame para escribir. Revisa el video de entrada.")
 
