@@ -241,6 +241,13 @@ else:
             frame_idx = 0
             procesados = 0
 
+            # Acumula, por ID de foliculo, la medida MAXIMA vista en cualquier
+            # frame (no el ultimo frame). Solo tiene sentido si el tracking
+            # esta activo, porque ahi el ID se mantiene entre frames -- sin
+            # tracking cada frame renumera los foliculos desde 1 y agruparlos
+            # por "id" mezclaria foliculos distintos.
+            foliculos_max = {}
+
             # Todo lo de esta corrida (progreso, spinner, video final) va
             # dentro de la columna derecha, para que quede al lado del
             # video original en vez de debajo de todo.
@@ -278,6 +285,26 @@ else:
                         foliculos = procesar_resultado(r, ESCALA_MM_PX)
                         plotted = draw_measurements(frame_bgr, foliculos) if foliculos else frame_bgr
 
+                        if usar_tracking:
+                            for f in foliculos:
+                                fid = f["id"]
+                                entry = foliculos_max.setdefault(fid, {
+                                    "eje_mayor_mm": None,
+                                    "eje_menor_mm": None,
+                                    "promedio_ejes_mm": None,
+                                    "diametro_equivalente_mm": None,
+                                    "confianza_max": None,
+                                })
+                                for campo in (
+                                    "eje_mayor_mm", "eje_menor_mm",
+                                    "promedio_ejes_mm", "diametro_equivalente_mm",
+                                ):
+                                    valor = f[campo]
+                                    if valor is not None and (entry[campo] is None or valor > entry[campo]):
+                                        entry[campo] = valor
+                                if entry["confianza_max"] is None or f["confianza"] > entry["confianza_max"]:
+                                    entry["confianza_max"] = f["confianza"]
+
                         # imageio espera frames en RGB, no BGR (formato nativo de cv2/ultralytics)
                         plotted_rgb = cv2.cvtColor(plotted, cv2.COLOR_BGR2RGB)
 
@@ -309,11 +336,38 @@ else:
                     writer.close()
 
             with col_procesado:
+                # Limpiamos la barra de progreso y el contador de frames: una
+                # vez listo, ya no aportan nada y solo ensucian la vista.
+                progress.empty()
+                status.empty()
+
                 if procesados > 0:
-                    st.success(f"Listo. {procesados} frames procesados con medidas en mm:")
                     st.video(out_path, width=VIDEO_WIDTH)
                 else:
                     st.warning("No se detecto ningun frame para escribir. Revisa el video de entrada.")
+
+            if procesados > 0:
+                if usar_tracking and foliculos_max:
+                    st.subheader("Detalle por foliculo (medida maxima detectada en el video)")
+                    data = []
+                    for fid in sorted(foliculos_max.keys()):
+                        m = foliculos_max[fid]
+                        data.append({
+                            "Foliculo": fid,
+                            "Confianza max.": round(m["confianza_max"], 3) if m["confianza_max"] is not None else None,
+                            "Eje mayor (mm)": m["eje_mayor_mm"],
+                            "Eje menor (mm)": m["eje_menor_mm"],
+                            "Promedio (mm)": m["promedio_ejes_mm"],
+                            "Diametro equiv. (mm)": m["diametro_equivalente_mm"],
+                        })
+                    st.table(data)
+                elif not usar_tracking:
+                    st.info(
+                        "Activa 'Activar tracking (ByteTrack)' en la barra lateral para "
+                        "ver la tabla de medida maxima por foliculo. Sin tracking, el "
+                        "ID de cada foliculo se reinicia en cada frame y no se puede "
+                        "seguir su medida a lo largo del video."
+                    )
 
         try:
             os.unlink(input_path)
