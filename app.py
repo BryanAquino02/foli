@@ -108,15 +108,16 @@ def procesar_resultado(r, escala_mm_px):
         track_ids = r.boxes.id.int().cpu().tolist()
 
     for i, (mask, box) in enumerate(zip(r.masks.data, r.boxes)):
-        # Mismo bug de siempre: masks.data viene en resolucion del modelo,
-        # hay que reescalar a la resolucion original del frame antes de medir.
-        # OJO: el resize se hace en float, con interpolacion lineal, y
-        # la mascara se binariza RECIEN despues del resize -- si se
-        # binariza antes (uint8 + INTER_NEAREST), cada pixel del modelo
-        # se estira en bloques cuadrados grandes y el contorno sale
-        # poligonal/facetado en vez de curvo.
+        # Con retina_masks=True (activado en predict/track mas abajo), YOLO
+        # ya calcula la mascara directamente en la resolucion original del
+        # frame -- mucho mas detalle en el borde que la mascara nativa del
+        # modelo (ej. 160x160), que es lo que causaba el aspecto poligonal.
+        # El resize queda solo como resguardo por si alguna vez llega en
+        # otro tamaño; se hace en float + interpolacion lineal, binarizando
+        # RECIEN despues del resize (nunca binarizar antes de reescalar).
         mask_np = mask.cpu().numpy().astype("float32")
-        mask_np = cv2.resize(mask_np, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+        if mask_np.shape != (orig_h, orig_w):
+            mask_np = cv2.resize(mask_np, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
         mask_np = (mask_np > 0.5).astype("uint8")
 
         ejes = feret_diameters_mm(mask_np, escala_mm_px)
@@ -138,6 +139,7 @@ def procesar_resultado(r, escala_mm_px):
             "mask": mask_np,
         })
     return foliculos
+
 # ---------- SIDEBAR ----------
 st.sidebar.header("Parametros")
 conf = st.sidebar.slider("Confianza minima", 0.05, 0.95, 0.5, 0.05)
@@ -157,7 +159,7 @@ if modo == "Imagen":
             st.image(img, use_container_width=True)
 
         with st.spinner("Corriendo inferencia..."):
-            results = model.predict(np.array(img), conf=conf, verbose=False)
+            results = model.predict(np.array(img), conf=conf, retina_masks=True, verbose=False)
             r = results[0]
             foliculos = procesar_resultado(r, ESCALA_MM_PX)
 
@@ -263,7 +265,9 @@ else:
             # stream=True: en vez de que ultralytics guarde un video completo con
             # su propio r.plot() (sin mm), iteramos resultado por resultado y
             # aplicamos el mismo pipeline de medicion que en modo Imagen antes de
-            # escribir el frame de salida.
+            # escribir el frame de salida. retina_masks=True: mismo motivo que en
+            # modo Imagen, mascaras en resolucion original en vez de la resolucion
+            # nativa (chica) del modelo -- evita el contorno poligonal.
             if usar_tracking:
                 fuente_resultados = model.track(
                     source=input_path,
@@ -273,6 +277,7 @@ else:
                     stream=True,
                     verbose=False,
                     vid_stride=frame_skip,
+                    retina_masks=True,
                 )
             else:
                 fuente_resultados = model.predict(
@@ -281,6 +286,7 @@ else:
                     stream=True,
                     verbose=False,
                     vid_stride=frame_skip,
+                    retina_masks=True,
                 )
 
             try:
