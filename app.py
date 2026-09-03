@@ -219,6 +219,11 @@ else:
     )
 
     if archivo is not None:
+        # Identificador unico de este archivo subido -- si el usuario sube
+        # un video distinto, invalidamos cualquier resultado cacheado del
+        # anterior. file_id es estable entre reruns para el MISMO archivo.
+        file_key = getattr(archivo, "file_id", None) or f"{archivo.name}_{archivo.size}"
+
         # Guardar el video temporalmente porque YOLO necesita una ruta de archivo
         tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
         tfile.write(archivo.read())
@@ -231,8 +236,6 @@ else:
             st.subheader("Original")
             st.video(input_path, width=VIDEO_WIDTH)
 
-        # Placeholder del lado derecho: antes de procesar solo muestra un
-        # aviso; se reemplaza con el video ya procesado mas abajo.
         with col_procesado:
             st.subheader("Deteccion y medicion")
             resultado_placeholder = st.empty()
@@ -244,47 +247,23 @@ else:
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             cap.release()
 
-            # Nombre unico por corrida (evita que una corrida anterior que no
-            # cerro bien el writer, o que sigue corriendo, choque con esta).
-            out_fd, out_path = tempfile.mkstemp(suffix=".mp4")
-            os.close(out_fd)
-            writer = None  # se crea recien con el primer frame (ya sabemos su tamaño)
-            # Usamos imageio + imageio-ffmpeg (trae su propio binario de ffmpeg
-            # empaquetado en el .whl, no depende de nada del sistema operativo)
-            # en vez de cv2.VideoWriter, porque el codec 'mp4v' de OpenCV genera
-            # archivos que muchos navegadores (Chrome/Safari) no pueden reproducir
-            # via <video> -- se necesita H.264 (libx264) en un mp4 bien formado.
-            import imageio
-
-            # fps efectivo del video de salida: si saltamos frames, el video de
-            # salida tambien corre mas lento en frames-procesados-por-segundo,
-            # asi que ajustamos el fps de escritura para que la duracion visual
-            # se mantenga parecida al video original.
             fps_out = max(fps_in / frame_skip, 1)
 
             frame_idx = 0
             procesados = 0
 
-            # Acumula, por ID de foliculo, la medida MAXIMA vista en cualquier
-            # frame (no el ultimo frame). Solo tiene sentido si el tracking
-            # esta activo, porque ahi el ID se mantiene entre frames -- sin
-            # tracking cada frame renumera los foliculos desde 1 y agruparlos
-            # por "id" mezclaria foliculos distintos.
+            # Resultados CRUDOS: el frame original (BGR) + los foliculos
+            # detectados en el, SIN dibujar nada todavia. Esto es lo que se
+            # guarda en session_state -- lo lento (inferencia) se corre UNA
+            # sola vez aqui; el dibujo de capas se hace despues, aparte,
+            # cada vez que cambian los checkboxes, sin volver a correr YOLO.
+            resultados_crudos = []
             foliculos_max = {}
 
-            # Todo lo de esta corrida (progreso, spinner, video final) va
-            # dentro de la columna derecha, para que quede al lado del
-            # video original en vez de debajo de todo.
             resultado_placeholder.empty()
             progress = col_procesado.progress(0.0)
             status = col_procesado.empty()
 
-            # stream=True: en vez de que ultralytics guarde un video completo con
-            # su propio r.plot() (sin mm), iteramos resultado por resultado y
-            # aplicamos el mismo pipeline de medicion que en modo Imagen antes de
-            # escribir el frame de salida. retina_masks=True: mismo motivo que en
-            # modo Imagen, mascaras en resolucion original en vez de la resolucion
-            # nativa (chica) del modelo -- evita el contorno poligonal.
             if usar_tracking:
                 fuente_resultados = model.track(
                     source=input_path,
@@ -306,103 +285,116 @@ else:
                     retina_masks=True,
                 )
 
+            with col_procesado, st.spinner("Procesando video... esto puede tardar segun duracion/resolucion"):
+                for r in fuente_resultados:
+                    frame_bgr = r.orig_img.copy()  # copy: r.orig_img se reutiliza/libera en el siguiente ciclo
+                    foliculos = procesar_resultado(r, ESCALA_MM_PX)
+                    resultados_crudos.append((frame_bgr, foliculos))
+
+                    if usar_tracking:
+                        for f in foliculos:
+                            fid = f["id"]
+                            entry = foliculos_max.setdefault(fid, {
+                                "eje_mayor_mm": None,
+                                "eje_menor_mm": None,
+                                "promedio_ejes_mm": None,
+                                "diametro_equivalente_mm": None,
+                                "confianza_max": None,
+                            })
+                            for campo in (
+                                "eje_mayor_mm", "eje_menor_mm",
+                                "promedio_ejes_mm", "diametro_equivalente_mm",
+                            ):
+                                valor = f[campo]
+                                if valor is not None and (entry[campo] is None or valor > entry[campo]):
+                                    entry[campo] = valor
+                            if entry["confianza_max"] is None or f["confianza"] > entry["confianza_max"]:
+                                entry["confianza_max"] = f["confianza"]
+
+                    procesados += 1
+                    frame_idx += frame_skip
+                    if total_frames:
+                        progress.progress(min(frame_idx / total_frames, 1.0))
+                    status.caption(f"Frames procesados: {procesados}")
+
+            progress.empty()
+            status.empty()
+
+            # Cachea los resultados crudos -- persisten entre reruns (ej. al
+            # tocar un checkbox de capas) hasta que se suba un video nuevo.
+            st.session_state["video_cache"] = {
+                "file_key": file_key,
+                "resultados_crudos": resultados_crudos,
+                "foliculos_max": foliculos_max,
+                "fps_out": fps_out,
+                "usar_tracking": usar_tracking,
+            }
+
+        # ---- RENDER: corre con los resultados cacheados (si existen para
+        # este archivo), sin volver a tocar el modelo. Esto es lo que se
+        # re-ejecuta solo con tocar un checkbox de capas visuales.
+        cache = st.session_state.get("video_cache")
+        if cache is not None and cache["file_key"] == file_key:
+            import imageio
+
+            out_fd, out_path = tempfile.mkstemp(suffix=".mp4")
+            os.close(out_fd)
+            writer = None
+
             try:
-                with col_procesado, st.spinner("Procesando video... esto puede tardar segun duracion/resolucion"):
-                    for r in fuente_resultados:
-                        frame_bgr = r.orig_img  # ya viene en BGR (formato de cv2/ultralytics)
-                        foliculos = procesar_resultado(r, ESCALA_MM_PX)
-                        plotted = draw_measurements(
-                            frame_bgr, foliculos,
-                            mostrar_relleno=mostrar_relleno,
-                            mostrar_contorno=mostrar_contorno,
-                            mostrar_eje_mayor=mostrar_eje_mayor,
-                            mostrar_eje_menor=mostrar_eje_menor,
-                            mostrar_etiqueta=mostrar_etiqueta,
-                        ) if foliculos else frame_bgr
+                for frame_bgr, foliculos in cache["resultados_crudos"]:
+                    plotted = draw_measurements(
+                        frame_bgr, foliculos,
+                        mostrar_relleno=mostrar_relleno,
+                        mostrar_contorno=mostrar_contorno,
+                        mostrar_eje_mayor=mostrar_eje_mayor,
+                        mostrar_eje_menor=mostrar_eje_menor,
+                        mostrar_etiqueta=mostrar_etiqueta,
+                    ) if foliculos else frame_bgr
+                    plotted_rgb = cv2.cvtColor(plotted, cv2.COLOR_BGR2RGB)
 
-                        if usar_tracking:
-                            for f in foliculos:
-                                fid = f["id"]
-                                entry = foliculos_max.setdefault(fid, {
-                                    "eje_mayor_mm": None,
-                                    "eje_menor_mm": None,
-                                    "promedio_ejes_mm": None,
-                                    "diametro_equivalente_mm": None,
-                                    "confianza_max": None,
-                                })
-                                for campo in (
-                                    "eje_mayor_mm", "eje_menor_mm",
-                                    "promedio_ejes_mm", "diametro_equivalente_mm",
-                                ):
-                                    valor = f[campo]
-                                    if valor is not None and (entry[campo] is None or valor > entry[campo]):
-                                        entry[campo] = valor
-                                if entry["confianza_max"] is None or f["confianza"] > entry["confianza_max"]:
-                                    entry["confianza_max"] = f["confianza"]
-
-                        # imageio espera frames en RGB, no BGR (formato nativo de cv2/ultralytics)
-                        plotted_rgb = cv2.cvtColor(plotted, cv2.COLOR_BGR2RGB)
-
-                        if writer is None:
-                            # No pasamos "-pix_fmt yuv420p" a mano: imageio-ffmpeg ya
-                            # lo agrega por defecto con codec libx264, y pasarlo de
-                            # nuevo generaba el warning "Multiple -pix_fmt options
-                            # specified" en los logs (no rompia nada, pero ensuciaba).
-                            writer = imageio.get_writer(
-                                out_path,
-                                fps=fps_out,
-                                codec="libx264",
-                                quality=8,
-                                macro_block_size=1,  # evita que imageio recorte/reescale por multiplos de 16
-                            )
-
-                        writer.append_data(plotted_rgb)
-
-                        procesados += 1
-                        frame_idx += frame_skip
-                        if total_frames:
-                            progress.progress(min(frame_idx / total_frames, 1.0))
-                        status.caption(f"Frames procesados: {procesados}")
+                    if writer is None:
+                        writer = imageio.get_writer(
+                            out_path,
+                            fps=cache["fps_out"],
+                            codec="libx264",
+                            quality=8,
+                            macro_block_size=1,
+                        )
+                    writer.append_data(plotted_rgb)
             finally:
-                # Pase lo que pase (exito, excepcion, video vacio), liberamos el
-                # proceso de ffmpeg. Si esto no se cierra, la proxima corrida
-                # puede arrastrar procesos colgados y logs raros de ffmpeg.
                 if writer is not None:
                     writer.close()
 
             with col_procesado:
-                # Limpiamos la barra de progreso y el contador de frames: una
-                # vez listo, ya no aportan nada y solo ensucian la vista.
-                progress.empty()
-                status.empty()
+                st.video(out_path, width=VIDEO_WIDTH)
 
-                if procesados > 0:
-                    st.video(out_path, width=VIDEO_WIDTH)
-                else:
-                    st.warning("No se detecto ningun frame para escribir. Revisa el video de entrada.")
+            if cache["usar_tracking"] and cache["foliculos_max"]:
+                st.subheader("Detalle por foliculo (medida maxima detectada en el video)")
+                data = []
+                for fid in sorted(cache["foliculos_max"].keys()):
+                    m = cache["foliculos_max"][fid]
+                    data.append({
+                        "Foliculo": fid,
+                        "Confianza max.": round(m["confianza_max"], 3) if m["confianza_max"] is not None else None,
+                        "Eje mayor (mm)": m["eje_mayor_mm"],
+                        "Eje menor (mm)": m["eje_menor_mm"],
+                        "Promedio (mm)": m["promedio_ejes_mm"],
+                        "Diametro equiv. (mm)": m["diametro_equivalente_mm"],
+                    })
+                st.table(data)
+            elif not cache["usar_tracking"]:
+                st.info(
+                    "Activa 'Activar tracking (ByteTrack)' en la barra lateral para "
+                    "ver la tabla de medida maxima por foliculo. Sin tracking, el "
+                    "ID de cada foliculo se reinicia en cada frame y no se puede "
+                    "seguir su medida a lo largo del video."
+                )
 
-            if procesados > 0:
-                if usar_tracking and foliculos_max:
-                    st.subheader("Detalle por foliculo (medida maxima detectada en el video)")
-                    data = []
-                    for fid in sorted(foliculos_max.keys()):
-                        m = foliculos_max[fid]
-                        data.append({
-                            "Foliculo": fid,
-                            "Confianza max.": round(m["confianza_max"], 3) if m["confianza_max"] is not None else None,
-                            "Eje mayor (mm)": m["eje_mayor_mm"],
-                            "Eje menor (mm)": m["eje_menor_mm"],
-                            "Promedio (mm)": m["promedio_ejes_mm"],
-                            "Diametro equiv. (mm)": m["diametro_equivalente_mm"],
-                        })
-                    st.table(data)
-                elif not usar_tracking:
-                    st.info(
-                        "Activa 'Activar tracking (ByteTrack)' en la barra lateral para "
-                        "ver la tabla de medida maxima por foliculo. Sin tracking, el "
-                        "ID de cada foliculo se reinicia en cada frame y no se puede "
-                        "seguir su medida a lo largo del video."
-                    )
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
 
         try:
             os.unlink(input_path)
