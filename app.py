@@ -108,10 +108,16 @@ def procesar_resultado(r, escala_mm_px):
         track_ids = r.boxes.id.int().cpu().tolist()
 
     for i, (mask, box) in enumerate(zip(r.masks.data, r.boxes)):
-        mask_np = mask.cpu().numpy().astype("uint8")
         # Mismo bug de siempre: masks.data viene en resolucion del modelo,
         # hay que reescalar a la resolucion original del frame antes de medir.
-        mask_np = cv2.resize(mask_np, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+        # OJO: el resize se hace en float, con interpolacion lineal, y
+        # la mascara se binariza RECIEN despues del resize -- si se
+        # binariza antes (uint8 + INTER_NEAREST), cada pixel del modelo
+        # se estira en bloques cuadrados grandes y el contorno sale
+        # poligonal/facetado en vez de curvo.
+        mask_np = mask.cpu().numpy().astype("float32")
+        mask_np = cv2.resize(mask_np, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+        mask_np = (mask_np > 0.5).astype("uint8")
 
         ejes = feret_diameters_mm(mask_np, escala_mm_px)
         diam_equiv_mm, _ = mask_to_diameter_mm(mask_np, escala_mm_px)
@@ -132,7 +138,6 @@ def procesar_resultado(r, escala_mm_px):
             "mask": mask_np,
         })
     return foliculos
-
 # ---------- SIDEBAR ----------
 st.sidebar.header("Parametros")
 conf = st.sidebar.slider("Confianza minima", 0.05, 0.95, 0.5, 0.05)
