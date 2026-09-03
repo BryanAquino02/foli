@@ -84,25 +84,21 @@ def _rellenar_mascara_transparente(image_bgr, mask, color_bgr, alpha=ALPHA_RELLE
     return out
 
 
-def draw_measurements(image_bgr: np.ndarray, foliculos: list[dict]) -> np.ndarray:
+def draw_measurements(
+    image_bgr: np.ndarray,
+    foliculos: list[dict],
+    mostrar_relleno: bool = True,
+    mostrar_contorno: bool = True,
+    mostrar_eje_mayor: bool = True,
+    mostrar_eje_menor: bool = True,
+    mostrar_etiqueta: bool = True,
+) -> np.ndarray:
     """
-    image_bgr: imagen original (formato OpenCV, BGR) sobre la que dibujar.
-    foliculos: lista de dicts, cada uno con:
-        - 'p_mayor_1', 'p_mayor_2': extremos del eje mayor (puntos reales
-          del contorno, nunca se salen de la máscara)
-        - 'p_menor_1', 'p_menor_2': extremos del eje menor
-        - 'eje_mayor_mm', 'eje_menor_mm'
-        - 'promedio_ejes_mm' (opcional): si no viene, se calcula del mayor/menor
-        - 'mask' (opcional): la máscara real, usada para el relleno
-          semitransparente y el contorno de fondo
+    ... (mismo docstring que antes) ...
 
-    Cada folículo se dibuja con un color según su tamaño (pequeño/mediano/
-    grande) -- útil para identificar de un vistazo el folículo dominante.
-    El área segmentada se rellena con ese mismo color, semitransparente,
-    para que se vea de un vistazo qué región detectó el modelo.
-
-    Devuelve una COPIA de la imagen con el relleno, líneas y textos
-    dibujados (no modifica la imagen original).
+    mostrar_relleno / mostrar_contorno / mostrar_eje_mayor / mostrar_eje_menor /
+    mostrar_etiqueta: activan o desactivan cada capa visual de forma
+    independiente, para poder ver solo lo que se necesita en cada momento.
     """
     out = image_bgr.copy()
 
@@ -118,40 +114,35 @@ def draw_measurements(image_bgr: np.ndarray, foliculos: list[dict]) -> np.ndarra
 
         mask = f.get("mask")
 
-        # relleno semitransparente de la máscara -- va primero, para que
-        # el contorno, los ejes y la etiqueta se dibujen nítidos encima
-        if mask is not None:
+        if mostrar_relleno and mask is not None:
             out = _rellenar_mascara_transparente(out, mask, color)
 
-        # contorno real de la segmentación, de fondo
-        if mask is not None:
+        if mostrar_contorno and mask is not None:
             mask_bin = (mask > 0).astype(np.uint8) * 255
             contours, _ = cv2.findContours(
                 mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
             )
             cv2.drawContours(out, contours, -1, (235, 235, 235), 1, cv2.LINE_AA)
 
-        # eje mayor: línea sólida entre los 2 puntos reales del contorno
-        # más separados entre sí -- nunca se sale de la máscara
         p1 = (int(round(p_mayor_1[0])), int(round(p_mayor_1[1])))
         p2 = (int(round(p_mayor_2[0])), int(round(p_mayor_2[1])))
-        cv2.line(out, p1, p2, color, 2, cv2.LINE_AA)
-        _draw_cross(out, p1, color)
-        _draw_cross(out, p2, color)
 
-        # eje menor: línea punteada perpendicular, también anclada al
-        # contorno real
-        p_menor_1, p_menor_2 = f.get("p_menor_1"), f.get("p_menor_2")
-        if p_menor_1 is not None and p_menor_2 is not None:
-            q1 = (int(round(p_menor_1[0])), int(round(p_menor_1[1])))
-            q2 = (int(round(p_menor_2[0])), int(round(p_menor_2[1])))
-            _draw_dotted_line(out, q1, q2, color)
+        if mostrar_eje_mayor:
+            cv2.line(out, p1, p2, color, 2, cv2.LINE_AA)
+            _draw_cross(out, p1, color)
+            _draw_cross(out, p2, color)
 
-        center = (int(round((p1[0]+p2[0])/2)), int(round((p1[1]+p2[1])/2)))
+        if mostrar_eje_menor:
+            p_menor_1, p_menor_2 = f.get("p_menor_1"), f.get("p_menor_2")
+            if p_menor_1 is not None and p_menor_2 is not None:
+                q1 = (int(round(p_menor_1[0])), int(round(p_menor_1[1])))
+                q2 = (int(round(p_menor_2[0])), int(round(p_menor_2[1])))
+                _draw_dotted_line(out, q1, q2, color)
 
-        # etiqueta con el diámetro mayor en mm
-        label = f"{f['eje_mayor_mm']:.1f} mm"
-        _draw_label(out, label, (center[0] + 8, center[1] - 8), color)
+        if mostrar_etiqueta:
+            center = (int(round((p1[0]+p2[0])/2)), int(round((p1[1]+p2[1])/2)))
+            label = f"{f['eje_mayor_mm']:.1f} mm"
+            _draw_label(out, label, (center[0] + 8, center[1] - 8), color)
 
     return out
 
