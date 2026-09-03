@@ -146,6 +146,16 @@ conf = st.sidebar.slider("Confianza minima", 0.05, 0.95, 0.5, 0.05)
 modo = st.sidebar.radio("Modo", ["Imagen", "Video"])
 st.sidebar.caption(f"Escala activa: {ESCALA_MM_PX:.4f} mm/px")
 
+# Capas visuales: cada una se puede activar/desactivar de forma
+# independiente, sin afectar el calculo de las medidas (solo el dibujo).
+st.sidebar.markdown("---")
+st.sidebar.subheader("Capas visuales")
+mostrar_relleno = st.sidebar.checkbox("Relleno de mascara", value=True)
+mostrar_contorno = st.sidebar.checkbox("Contorno", value=True)
+mostrar_eje_mayor = st.sidebar.checkbox("Eje mayor", value=True)
+mostrar_eje_menor = st.sidebar.checkbox("Eje menor", value=True)
+mostrar_etiqueta = st.sidebar.checkbox("Etiqueta (mm)", value=True)
+
 # ---------- IMAGEN ----------
 if modo == "Imagen":
     archivo = st.file_uploader("Sube una imagen de ultrasonido", type=["png", "jpg", "jpeg", "bmp"])
@@ -166,7 +176,14 @@ if modo == "Imagen":
             # Dibujamos las lineas de medicion (estilo caliper) sobre la imagen,
             # en vez del plot por defecto de ultralytics (que solo marca cajas)
             img_bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-            plotted = draw_measurements(img_bgr, foliculos) if foliculos else img_bgr
+            plotted = draw_measurements(
+                img_bgr, foliculos,
+                mostrar_relleno=mostrar_relleno,
+                mostrar_contorno=mostrar_contorno,
+                mostrar_eje_mayor=mostrar_eje_mayor,
+                mostrar_eje_menor=mostrar_eje_menor,
+                mostrar_etiqueta=mostrar_etiqueta,
+            ) if foliculos else img_bgr
             plotted_rgb = cv2.cvtColor(plotted, cv2.COLOR_BGR2RGB)
 
         with col2:
@@ -294,7 +311,14 @@ else:
                     for r in fuente_resultados:
                         frame_bgr = r.orig_img  # ya viene en BGR (formato de cv2/ultralytics)
                         foliculos = procesar_resultado(r, ESCALA_MM_PX)
-                        plotted = draw_measurements(frame_bgr, foliculos) if foliculos else frame_bgr
+                        plotted = draw_measurements(
+                            frame_bgr, foliculos,
+                            mostrar_relleno=mostrar_relleno,
+                            mostrar_contorno=mostrar_contorno,
+                            mostrar_eje_mayor=mostrar_eje_mayor,
+                            mostrar_eje_menor=mostrar_eje_menor,
+                            mostrar_etiqueta=mostrar_etiqueta,
+                        ) if foliculos else frame_bgr
 
                         if usar_tracking:
                             for f in foliculos:
