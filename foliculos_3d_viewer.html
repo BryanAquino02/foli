@@ -1,0 +1,176 @@
+<!--
+  Visor 3D de foliculos con Three.js.
+
+  Reemplaza a visualizacion_3d.py (Plotly) para el caso de uso "video /
+  tiempo real", donde actualizar una figura Plotly completa en cada frame
+  es lento. Aca se mantiene un mesh persistente por foliculo (por su id de
+  ByteTrack) y solo se actualiza/crea/borra lo que cambio entre frames.
+
+  Uso desde Streamlit (ver streamlit_snippet.py):
+    - Prototipo simple: reemplazar __DATOS_FOLICULOS__ con el JSON del
+      frame antes de pasar este HTML a components.html(). Cada rerun
+      recarga el iframe completo (no es real-time de verdad, pero sirve
+      para validar visualmente que la forma/posicion/color son correctas).
+    - Real-time de verdad: este mismo archivo, pero alimentado via
+      postMessage desde afuera del iframe en vez de re-inyectar el HTML
+      entero. La funcion actualizarEscena() ya esta separada para eso.
+-->
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; background: transparent; overflow: hidden; }
+  #contenedor { width: 100%; height: 600px; }
+</style>
+</head>
+<body>
+<div id="contenedor"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function () {
+  const contenedor = document.getElementById("contenedor");
+  const ancho = contenedor.clientWidth || 800;
+  const alto = 600;
+
+  // --- Escena, camara ortografica cenital (misma idea que eye=(0,0,2.5) en Plotly) ---
+  const scene = new THREE.Scene();
+
+  const frustumSize = 80; // mm visibles en pantalla; ajustar segun tamano tipico de imagen
+  const aspecto = ancho / alto;
+  const camera = new THREE.OrthographicCamera(
+    (-frustumSize * aspecto) / 2, (frustumSize * aspecto) / 2,
+    frustumSize / 2, -frustumSize / 2,
+    0.1, 1000
+  );
+  camera.position.set(0, 0, 100);
+  camera.lookAt(0, 0, 0);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+  renderer.setSize(ancho, alto);
+  contenedor.appendChild(renderer.domElement);
+
+  scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+  const luzDireccional = new THREE.DirectionalLight(0xffffff, 0.6);
+  luzDireccional.position.set(0, 0, 50);
+  scene.add(luzDireccional);
+
+  // id (int) -> { mesh, diametro_mm, color } — persistente entre frames
+  const meshesPorId = new Map();
+
+  const PROFUNDIDAD_MM = 2.5; // "inflado" simetrico, equivalente al que usa generar_blob() en Plotly
+
+  function crearGeometriaDesdeContorno(contorno_mm, cx_mm, cy_mm) {
+    // contorno_mm ya viene ordenado (sale directo de cv2.findContours),
+    // no hace falta reordenar por angulo como en el approach de Plotly.
+    const puntos = contorno_mm.map(([x, y]) => new THREE.Vector2(x - cx_mm, -(y - cy_mm)));
+    if (puntos.length < 3) return null;
+
+    const shape = new THREE.Shape(puntos);
+    const geometria = new THREE.ExtrudeGeometry(shape, {
+      depth: PROFUNDIDAD_MM,
+      bevelEnabled: true,
+      bevelThickness: PROFUNDIDAD_MM * 0.6,
+      bevelSize: 0.5,
+      bevelSegments: 4,
+      steps: 1,
+    });
+    geometria.translate(0, 0, -PROFUNDIDAD_MM / 2); // centrar en Z, como el "abombado" doble de Plotly
+    return geometria;
+  }
+
+  function crearFoliculoMesh(f) {
+    const geometria = crearGeometriaDesdeContorno(f.contorno_mm, f.centro_x_mm, f.centro_y_mm);
+    if (!geometria) return null;
+
+    const material = new THREE.MeshStandardMaterial({
+      color: f.color,
+      opacity: 0.85,
+      transparent: true,
+      roughness: 0.4,
+    });
+    const mesh = new THREE.Mesh(geometria, material);
+    mesh.position.set(f.centro_x_mm, f.centro_y_mm, 0);
+    mesh.userData.id = f.id;
+    return mesh;
+  }
+
+  /**
+   * Punto de entrada principal. Recibe la lista de foliculos del frame
+   * actual (mismo shape que foliculos_a_json() en Python) y hace un diff
+   * contra lo que ya esta en escena: actualiza posicion de los que siguen,
+   * reconstruye geometria si cambio el contorno, agrega los nuevos, y
+   * saca los que ya no estan en el frame (folliculo perdio tracking).
+   */
+  window.actualizarEscena = function (foliculosFrame) {
+    const idsEnFrame = new Set(foliculosFrame.map((f) => f.id));
+
+    // sacar de escena los que ya no aparecen (tracking perdido)
+    for (const [id, entry] of meshesPorId) {
+      if (!idsEnFrame.has(id)) {
+        scene.remove(entry.mesh);
+        entry.mesh.geometry.dispose();
+        entry.mesh.material.dispose();
+        meshesPorId.delete(id);
+      }
+    }
+
+    for (const f of foliculosFrame) {
+      const existente = meshesPorId.get(f.id);
+
+      if (!existente) {
+        const mesh = crearFoliculoMesh(f);
+        if (mesh) {
+          scene.add(mesh);
+          meshesPorId.set(f.id, { mesh, diametro_mm: f.diametro_mm, color: f.color });
+        }
+        continue;
+      }
+
+      // ya existia: mover es barato, reconstruir geometria solo si hace falta
+      existente.mesh.position.set(f.centro_x_mm, f.centro_y_mm, 0);
+
+      const geometriaNueva = crearGeometriaDesdeContorno(f.contorno_mm, f.centro_x_mm, f.centro_y_mm);
+      if (geometriaNueva) {
+        existente.mesh.geometry.dispose();
+        existente.mesh.geometry = geometriaNueva;
+      }
+
+      if (existente.color !== f.color) {
+        existente.mesh.material.color.set(f.color);
+        existente.color = f.color;
+      }
+    }
+
+    renderer.render(scene, camera);
+  };
+
+  // --- Interaccion basica: orbit manual simple (click+arrastrar para rotar) ---
+  let arrastrando = false, prevX = 0, prevY = 0;
+  let rotX = 0, rotY = 0;
+  renderer.domElement.addEventListener("pointerdown", (e) => { arrastrando = true; prevX = e.clientX; prevY = e.clientY; });
+  window.addEventListener("pointerup", () => { arrastrando = false; });
+  window.addEventListener("pointermove", (e) => {
+    if (!arrastrando) return;
+    rotY += (e.clientX - prevX) * 0.01;
+    rotX += (e.clientY - prevY) * 0.01;
+    prevX = e.clientX; prevY = e.clientY;
+    scene.rotation.set(rotX, rotY, 0);
+    renderer.render(scene, camera);
+  });
+
+  // --- Escuchar datos desde afuera del iframe (para el path real-time via postMessage) ---
+  window.addEventListener("message", (event) => {
+    if (event.data && event.data.tipo === "foliculos_frame") {
+      window.actualizarEscena(event.data.foliculos);
+    }
+  });
+
+  // --- Datos iniciales inyectados por Python (prototipo simple, un frame por rerun) ---
+  const datosIniciales = __DATOS_FOLICULOS__;
+  window.actualizarEscena(datosIniciales);
+})();
+</script>
+</body>
+</html>

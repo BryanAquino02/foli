@@ -4,7 +4,7 @@ Version adaptada para correr en Hugging Face Spaces (SDK: streamlit)
 
 El modelo (best.pt) debe estar subido en la raiz del Space, junto a este archivo.
 """
-
+from visualizacion_3d import mostrar_foliculos_3d
 import streamlit as st
 from ultralytics import YOLO
 from PIL import Image
@@ -15,7 +15,8 @@ import cv2
 
 from calibration import mask_to_diameter_mm, feret_diameters_mm, get_scale
 from visualizacion import draw_measurements
-
+import sys
+st.write("DEBUG Python usado por Streamlit:", sys.executable)
 # ---------- CONFIG ----------
 # Ruta relativa: en HF Spaces el modelo debe subirse junto a app.py
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best.pt")
@@ -108,13 +109,6 @@ def procesar_resultado(r, escala_mm_px):
         track_ids = r.boxes.id.int().cpu().tolist()
 
     for i, (mask, box) in enumerate(zip(r.masks.data, r.boxes)):
-        # Con retina_masks=True (activado en predict/track mas abajo), YOLO
-        # ya calcula la mascara directamente en la resolucion original del
-        # frame -- mucho mas detalle en el borde que la mascara nativa del
-        # modelo (ej. 160x160), que es lo que causaba el aspecto poligonal.
-        # El resize queda solo como resguardo por si alguna vez llega en
-        # otro tamaño; se hace en float + interpolacion lineal, binarizando
-        # RECIEN despues del resize (nunca binarizar antes de reescalar).
         mask_np = mask.cpu().numpy().astype("float32")
         if mask_np.shape != (orig_h, orig_w):
             mask_np = cv2.resize(mask_np, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
@@ -122,6 +116,27 @@ def procesar_resultado(r, escala_mm_px):
 
         ejes = feret_diameters_mm(mask_np, escala_mm_px)
         diam_equiv_mm, _ = mask_to_diameter_mm(mask_np, escala_mm_px)
+
+        # centroide del foliculo en mm (posicion real en la imagen)
+        M = cv2.moments(mask_np)
+        if M["m00"] != 0:
+            cx_px = M["m10"] / M["m00"]
+            cy_px = M["m01"] / M["m00"]
+        else:
+            cx_px, cy_px = 0, 0
+
+        centro_x_mm = cx_px * escala_mm_px
+        centro_y_mm = cy_px * escala_mm_px
+
+        # NUEVO: contorno real de la mascara, en mm, para la forma 3D
+        contornos_cv, _ = cv2.findContours(mask_np, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        contorno_mm = []
+        if contornos_cv:
+            c = max(contornos_cv, key=cv2.contourArea)
+            paso = max(1, len(c) // 40)
+            for pt in c[::paso]:
+                px, py = pt[0]
+                contorno_mm.append((px * escala_mm_px, py * escala_mm_px))
 
         foliculo_id = track_ids[i] if track_ids is not None else i + 1
 
@@ -132,6 +147,9 @@ def procesar_resultado(r, escala_mm_px):
             "eje_menor_mm": round(ejes["eje_menor_mm"], 2) if ejes else None,
             "promedio_ejes_mm": round(ejes["promedio_mm"], 2) if ejes else None,
             "diametro_equivalente_mm": round(diam_equiv_mm, 2),
+            "centro_x_mm": round(centro_x_mm, 2),
+            "centro_y_mm": round(centro_y_mm, 2),
+            "contorno_mm": contorno_mm,
             "p_mayor_1": ejes["p_mayor_1"] if ejes else None,
             "p_mayor_2": ejes["p_mayor_2"] if ejes else None,
             "p_menor_1": ejes["p_menor_1"] if ejes else None,
@@ -206,6 +224,10 @@ if modo == "Imagen":
                     "Diametro equiv. (mm)": f["diametro_equivalente_mm"],
                 })
             st.table(data)
+
+            st.subheader("Vista 3D interactiva")
+            fig_3d = mostrar_foliculos_3d(foliculos)
+            st.plotly_chart(fig_3d, use_container_width=True)
 
 # ---------- VIDEO ----------
 else:
