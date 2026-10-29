@@ -262,7 +262,9 @@ else:
             st.subheader("Deteccion y medicion")
             resultado_placeholder = st.empty()
             resultado_placeholder.info("Presiona 'Procesar video' para ver el resultado aqui.")
-
+            
+        tabla_placeholder = st.empty()
+        
         if st.button("Procesar video"):
             cap = cv2.VideoCapture(input_path)
             fps_in = cap.get(cv2.CAP_PROP_FPS) or 30
@@ -392,19 +394,20 @@ else:
                 st.video(out_path, width=VIDEO_WIDTH)
 
             if cache["usar_tracking"] and cache["foliculos_max"]:
-                st.subheader("Detalle por foliculo (medida maxima detectada en el video)")
-                data = []
-                for fid in sorted(cache["foliculos_max"].keys()):
-                    m = cache["foliculos_max"][fid]
-                    data.append({
-                        "Foliculo": fid,
-                        "Confianza max.": round(m["confianza_max"], 3) if m["confianza_max"] is not None else None,
-                        "Eje mayor (mm)": m["eje_mayor_mm"],
-                        "Eje menor (mm)": m["eje_menor_mm"],
-                        "Promedio (mm)": m["promedio_ejes_mm"],
-                        "Diametro equiv. (mm)": m["diametro_equivalente_mm"],
-                    })
-                st.table(data)
+                with tabla_placeholder.container():
+                    st.subheader("Detalle por foliculo (medida maxima detectada en el video)")
+                    data = []
+                    for fid in sorted(cache["foliculos_max"].keys()):
+                        m = cache["foliculos_max"][fid]
+                        data.append({
+                            "Foliculo": fid,
+                            "Confianza max.": round(m["confianza_max"], 3) if m["confianza_max"] is not None else None,
+                            "Eje mayor (mm)": m["eje_mayor_mm"],
+                            "Eje menor (mm)": m["eje_menor_mm"],
+                            "Promedio (mm)": m["promedio_ejes_mm"],
+                            "Diametro equiv. (mm)": m["diametro_equivalente_mm"],
+                        })
+                    st.table(data)
             elif not cache["usar_tracking"]:
                 st.info(
                     "Activa 'Activar tracking (ByteTrack)' en la barra lateral para "
