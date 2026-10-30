@@ -289,11 +289,12 @@ else:
             status = col_procesado.empty()
 
             if usar_tracking:
+                model.predictor = None         
                 fuente_resultados = model.track(
                     source=input_path,
                     conf=conf,
                     tracker="bytetrack.yaml",
-                    persist=True,
+                    persist=False,           
                     stream=True,
                     verbose=False,
                     vid_stride=frame_skip,
