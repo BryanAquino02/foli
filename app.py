@@ -15,8 +15,7 @@ import cv2
 
 from calibration import mask_to_diameter_mm, feret_diameters_mm, get_scale
 from visualizacion import draw_measurements
-import sys
-st.write("DEBUG Python usado por Streamlit:", sys.executable)
+
 # ---------- CONFIG ----------
 # Ruta relativa: en HF Spaces el modelo debe subirse junto a app.py
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "best.pt")
